@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Pitucopedia</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <style>
   :root{
     --link:#3366cc;
@@ -1512,7 +1513,16 @@ function doSearch(){
   }
 }
 
-/* ===== "Banco de dados" local (localStorage) ===== */
+/* ===== Supabase (banco de dados real, compartilhado entre todos os visitantes) =====
+   Preencha com os dados do SEU projeto Supabase (Project Settings > API).
+   A "anon key" é pública por design (protegida pelas regras RLS do banco). */
+const SUPABASE_URL = 'https://gphvuxkiqtzqccczhxbd.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImdwaHZ1eGtpcXR6cWNjY3poeGJkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODgxMjAyNTAsImV4cCI6MjEwMzY5NjI1MH0.rZ2Wht-q2OsAh3whhOKo-Eg5W4tAE6L0C52PHKkX70o';
+const supabaseClient = (SUPABASE_URL.startsWith('http') && window.supabase)
+  ? window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
+  : null;
+
+/* ===== "Banco de dados" local (localStorage) — ainda usado para login/contato ===== */
 const DB_USERS = 'pitucopedia_users';
 const DB_CONTATOS = 'pitucopedia_contatos';
 const DB_SESSAO = 'pitucopedia_sessao';
@@ -1663,8 +1673,9 @@ function submitContact(){
   setTimeout(() => closeModal('contato'), 900);
 }
 
-/* ===== Colocar o seu pituco ===== */
-const DB_PITUCOS = 'pitucopedia_pitucos';
+/* ===== Colocar o seu pituco (salvo no Supabase, visível para todos) ===== */
+const DB_PITUCOS = 'pitucopedia_pitucos'; // fallback local, usado só se o Supabase não estiver configurado
+let communityLoadToken = 0;
 
 function previewPitucoImagem(input){
   const preview = document.getElementById('pitucoImagemPreview');
@@ -1678,7 +1689,7 @@ function previewPitucoImagem(input){
   }
 }
 
-function submitPituco(){
+async function submitPituco(){
   const nome = document.getElementById('pitucoNome').value.trim();
   const insta = document.getElementById('pitucoInsta').value.trim();
   const desc = document.getElementById('pitucoDesc').value.trim();
@@ -1691,10 +1702,24 @@ function submitPituco(){
     return;
   }
 
-  const salvar = (imagemDataUrl) => {
-    const pitucos = dbGet(DB_PITUCOS, []);
-    pitucos.push({ nome, insta, desc, imagem: imagemDataUrl || null, enviadoEm: new Date().toISOString() });
-    dbSet(DB_PITUCOS, pitucos);
+  const salvar = async (imagemDataUrl) => {
+    const registro = { nome, insta, descricao: desc, imagem: imagemDataUrl || null, enviado_em: new Date().toISOString() };
+
+    if(supabaseClient){
+      status.textContent = 'Enviando...';
+      status.className = 'modal-msg';
+      const { error } = await supabaseClient.from('pitucos').insert(registro);
+      if(error){
+        status.textContent = 'Erro ao enviar: ' + error.message;
+        status.className = 'modal-msg error';
+        return;
+      }
+    } else {
+      // fallback local, caso o Supabase ainda não tenha sido configurado
+      const pitucos = dbGet(DB_PITUCOS, []);
+      pitucos.push({ ...registro, enviadoEm: registro.enviado_em });
+      dbSet(DB_PITUCOS, pitucos);
+    }
 
     status.textContent = 'Pituco enviado!';
     status.className = 'modal-msg ok';
@@ -1718,10 +1743,25 @@ function submitPituco(){
   }
 }
 
-function appendCommunityPitucos(){
+async function getPitucosEnviados(){
+  if(supabaseClient){
+    const { data, error } = await supabaseClient
+      .from('pitucos')
+      .select('*')
+      .order('enviado_em', { ascending: false });
+    if(error){
+      console.error('Erro ao buscar pitucos:', error.message);
+      return [];
+    }
+    return data.map(p => ({ nome: p.nome, insta: p.insta, desc: p.descricao, imagem: p.imagem }));
+  }
+  return dbGet(DB_PITUCOS, []);
+}
+
+async function appendCommunityPitucos(){
   const lista = document.getElementById('communityPitucosList');
   if(!lista) return;
-  const pitucos = dbGet(DB_PITUCOS, []);
+  const pitucos = await getPitucosEnviados();
   pitucos.forEach(p => {
     const li = document.createElement('li');
     li.style.marginBottom = '10px';
@@ -1743,7 +1783,7 @@ function appendCommunityPitucos(){
 }
 
 /* ===== Página: Pitucos da comunidade ===== */
-function loadCommunityPage(){
+async function loadCommunityPage(){
   currentArticleKey = 'pitucopedia';
   const tabArtigo = document.getElementById('tabArtigo');
   const tabHistorico = document.getElementById('tabHistorico');
@@ -1785,7 +1825,22 @@ function loadCommunityPage(){
     return `<li><a onclick="loadArticle('${k}')">${t}</a>${extra}</li>`;
   }).join('');
 
-  const enviados = dbGet(DB_PITUCOS, []);
+  const communityKeyAtStart = ++communityLoadToken;
+  document.getElementById('content').innerHTML = `
+    <h1>Pitucos da comunidade</h1>
+    <div class="subtitle-note">Todos os pitucos oficiais, fanarts e os enviados por quem visita a Pitucopedia</div>
+    <p><button onclick="openModal('submeterPituco')" style="border:1px solid var(--border);background:var(--link);color:#fff;padding:8px 14px;border-radius:2px;cursor:pointer;">Colocar o seu pituco</button></p>
+    <h2>Tipos oficiais (por @maduzeran)</h2>
+    <ul>${oficiaisHtml}</ul>
+    <h2>Fanarts da comunidade</h2>
+    <ul>${fanartsHtml}</ul>
+    <h2>Enviados por vocês</h2>
+    <p style="color:var(--muted);" id="enviadosLoading">Carregando...</p>
+  `;
+  window.scrollTo(0,0);
+
+  const enviados = await getPitucosEnviados();
+  if(communityLoadToken !== communityKeyAtStart) return; // usuário já navegou para outra página
   const enviadosHtml = enviados.length
     ? `<div style="display:flex;flex-wrap:wrap;gap:14px;">` + enviados.map(p => {
         const img = p.imagem
@@ -1805,18 +1860,8 @@ function loadCommunityPage(){
       }).join('') + `</div>`
     : `<p style="color:var(--muted);">Ainda não há pitucos enviados pela comunidade. Seja o(a) primeiro(a)!</p>`;
 
-  document.getElementById('content').innerHTML = `
-    <h1>Pitucos da comunidade</h1>
-    <div class="subtitle-note">Todos os pitucos oficiais, fanarts e os enviados por quem visita a Pitucopedia</div>
-    <p><button onclick="openModal('submeterPituco')" style="border:1px solid var(--border);background:var(--link);color:#fff;padding:8px 14px;border-radius:2px;cursor:pointer;">Colocar o seu pituco</button></p>
-    <h2>Tipos oficiais (por @maduzeran)</h2>
-    <ul>${oficiaisHtml}</ul>
-    <h2>Fanarts da comunidade</h2>
-    <ul>${fanartsHtml}</ul>
-    <h2>Enviados por vocês</h2>
-    ${enviadosHtml}
-  `;
-  window.scrollTo(0,0);
+  const loadingEl = document.getElementById('enviadosLoading');
+  if(loadingEl) loadingEl.outerHTML = enviadosHtml;
 }
 
 /* ===== Modo escuro ===== */
